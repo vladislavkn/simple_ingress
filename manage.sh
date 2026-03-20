@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE="docker compose -f $SCRIPT_DIR/docker-compose.yaml"
 CADDYFILE="$SCRIPT_DIR/Caddyfile"
 ENV_FILE="$SCRIPT_DIR/.env"
+CF_DIR="$SCRIPT_DIR/cloudflared"
+CF_CONFIG="$CF_DIR/config.yml"
 
 # --- Helpers ---
 
@@ -22,13 +24,21 @@ check_env() {
         echo "Error: Set DOMAIN in .env to your actual domain."
         exit 1
     fi
-    if [ -z "${TUNNEL_TOKEN:-}" ] || [ "$TUNNEL_TOKEN" = "your-tunnel-token-here" ]; then
-        echo "Error: Set TUNNEL_TOKEN in .env"
-        echo "  1. Go to https://one.dash.cloudflare.com"
-        echo "  2. Networks → Tunnels → Create a tunnel"
-        echo "  3. Copy the token into .env"
+    if [ -z "${TUNNEL_NAME:-}" ]; then
+        echo "Error: Set TUNNEL_NAME in .env."
         exit 1
     fi
+}
+
+check_tunnel_configured() {
+    if ! grep -q "^tunnel:" "$CF_CONFIG" || grep -q "^# tunnel" "$CF_CONFIG"; then
+        echo "Error: Tunnel not configured. Run '$0 setup' first."
+        exit 1
+    fi
+}
+
+get_tunnel_uuid() {
+    grep "^tunnel:" "$CF_CONFIG" | awk '{print $2}'
 }
 
 reload_caddy() {
@@ -41,8 +51,19 @@ reload_caddy() {
     fi
 }
 
+restart_tunnel() {
+    if is_tunnel_running; then
+        $COMPOSE restart tunnel
+        echo "Tunnel restarted."
+    fi
+}
+
 is_caddy_running() {
     docker inspect -f '{{.State.Running}}' caddy 2>/dev/null | grep -q true
+}
+
+is_tunnel_running() {
+    docker inspect -f '{{.State.Running}}' cloudflared 2>/dev/null | grep -q true
 }
 
 # --- Commands ---
@@ -55,8 +76,18 @@ cmd_setup() {
         exit 1
     fi
 
-    check_env
+    if ! command -v cloudflared &>/dev/null; then
+        echo "Error: cloudflared CLI is not installed on the host."
+        echo "Install: curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null"
+        echo '  echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list'
+        echo "  sudo apt update && sudo apt install cloudflared"
+        exit 1
+    fi
 
+    check_env
+    mkdir -p "$CF_DIR"
+
+    # Create docker network
     if ! docker network inspect caddy-net &>/dev/null; then
         echo "Creating caddy-net network..."
         docker network create caddy-net
@@ -64,15 +95,70 @@ cmd_setup() {
         echo "caddy-net network already exists."
     fi
 
+    # Authenticate with Cloudflare if not already
+    if [ ! -f "$HOME/.cloudflared/cert.pem" ]; then
+        echo ""
+        echo "Authenticating with Cloudflare..."
+        echo "A browser URL will be printed — open it to log in."
+        cloudflared tunnel login
+    else
+        echo "Cloudflare authentication found."
+    fi
+
+    # Create tunnel if it doesn't exist
+    if cloudflared tunnel list 2>/dev/null | grep -q "$TUNNEL_NAME"; then
+        echo "Tunnel '$TUNNEL_NAME' already exists."
+        TUNNEL_UUID=$(cloudflared tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
+    else
+        echo "Creating tunnel '$TUNNEL_NAME'..."
+        cloudflared tunnel create "$TUNNEL_NAME"
+        TUNNEL_UUID=$(cloudflared tunnel list 2>/dev/null | grep "$TUNNEL_NAME" | awk '{print $1}')
+    fi
+
+    echo "Tunnel UUID: $TUNNEL_UUID"
+
+    # Copy credentials into cloudflared dir
+    CREDS_SRC="$HOME/.cloudflared/${TUNNEL_UUID}.json"
+    CREDS_DST="$CF_DIR/${TUNNEL_UUID}.json"
+    if [ -f "$CREDS_SRC" ]; then
+        cp "$CREDS_SRC" "$CREDS_DST"
+        echo "Credentials copied to $CREDS_DST"
+    elif [ -f "$CREDS_DST" ]; then
+        echo "Credentials already in place."
+    else
+        echo "Error: Could not find credentials at $CREDS_SRC"
+        exit 1
+    fi
+
+    # Write cloudflared config (preserve existing ingress rules if any)
+    if grep -q "^tunnel:" "$CF_CONFIG" 2>/dev/null; then
+        # Update tunnel and credentials-file lines in place
+        sed -i "s|^tunnel:.*|tunnel: ${TUNNEL_UUID}|" "$CF_CONFIG"
+        sed -i "s|^credentials-file:.*|credentials-file: /etc/cloudflared/${TUNNEL_UUID}.json|" "$CF_CONFIG"
+    else
+        # Fresh config — prepend tunnel info before ingress
+        local tmp
+        tmp=$(mktemp)
+        cat > "$tmp" <<EOF
+tunnel: ${TUNNEL_UUID}
+credentials-file: /etc/cloudflared/${TUNNEL_UUID}.json
+
+$(cat "$CF_CONFIG")
+EOF
+        mv "$tmp" "$CF_CONFIG"
+    fi
+
     echo ""
-    echo "Setup complete. Run '$0 start' to launch."
+    echo "=== Setup complete ==="
+    echo "Tunnel: $TUNNEL_NAME ($TUNNEL_UUID)"
+    echo "Domain: $DOMAIN"
     echo ""
-    echo "Don't forget to add a wildcard public hostname in Cloudflare Tunnel dashboard:"
-    echo "  *.${DOMAIN} → http://caddy:80"
+    echo "Next: $0 start"
 }
 
 cmd_start() {
     check_env
+    check_tunnel_configured
     echo "Starting ingress..."
     $COMPOSE up -d
     echo "Running. Domain: $DOMAIN"
@@ -92,6 +178,7 @@ cmd_reload() {
 cmd_add() {
     local subdomain="$1"
     load_env
+    check_tunnel_configured
 
     # Validate: alphanumeric and hyphens only
     if [[ ! "$subdomain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
@@ -99,9 +186,11 @@ cmd_add() {
         exit 1
     fi
 
-    # Check if already exists
+    local fqdn="${subdomain}.${DOMAIN}"
+
+    # Check if already exists in Caddyfile
     if grep -q "^${subdomain}\.\{\\\$DOMAIN\}" "$CADDYFILE"; then
-        echo "Error: ${subdomain}.\$DOMAIN already exists in Caddyfile."
+        echo "Error: $fqdn already exists."
         exit 1
     fi
 
@@ -112,54 +201,93 @@ cmd_add() {
         exit 1
     fi
 
-    # Append to Caddyfile
+    # 1. Add to Caddyfile
     cat >> "$CADDYFILE" <<EOF
 
 ${subdomain}.{\$DOMAIN} {
     reverse_proxy ${upstream}
 }
 EOF
+    echo "[Caddy] Added: $fqdn → $upstream"
 
-    echo "Added: ${subdomain}.${DOMAIN} → ${upstream}"
+    # 2. Add to cloudflared config (insert before the catch-all rule)
+    sed -i "/^  - service: http_status:404/i\\  - hostname: ${fqdn}\n    service: http://caddy:80" "$CF_CONFIG"
+    echo "[Tunnel] Added ingress: $fqdn → caddy:80"
 
-    # Reload if Caddy is running
+    # 3. Add DNS record
+    if command -v cloudflared &>/dev/null; then
+        echo "[DNS] Creating CNAME for $fqdn..."
+        cloudflared tunnel route dns "$TUNNEL_NAME" "$fqdn" 2>&1 || echo "  Warning: DNS route may already exist or failed. Check manually."
+    else
+        echo "[DNS] cloudflared not on host — add CNAME manually:"
+        echo "  $fqdn → $(get_tunnel_uuid).cfargotunnel.com (proxied)"
+    fi
+
+    # 4. Reload/restart running services
     if is_caddy_running; then
         reload_caddy
     else
-        echo "Caddy is not running. Start with '$0 start', then reload."
+        echo "Caddy is not running. Start with '$0 start'."
     fi
+
+    if is_tunnel_running; then
+        restart_tunnel
+    fi
+
+    echo ""
+    echo "Done. $fqdn is ready."
 }
 
 cmd_delete() {
     local subdomain="$1"
     load_env
 
+    local fqdn="${subdomain}.${DOMAIN}"
+
     if ! grep -q "^${subdomain}\.\{\\\$DOMAIN\}" "$CADDYFILE"; then
-        echo "Error: ${subdomain}.\$DOMAIN not found in Caddyfile."
+        echo "Error: $fqdn not found in Caddyfile."
         exit 1
     fi
 
-    # Remove the block: blank line before + subdomain line + content + closing brace
+    # 1. Remove from Caddyfile
     sed -i "/^$/N;/\n${subdomain}\.\{\\\$DOMAIN\}/,/^}/d" "$CADDYFILE"
+    echo "[Caddy] Removed: $fqdn"
 
-    echo "Deleted: ${subdomain}.${DOMAIN}"
+    # 2. Remove from cloudflared config (hostname line + service line below it)
+    sed -i "/^  - hostname: ${fqdn}$/{N;d;}" "$CF_CONFIG"
+    echo "[Tunnel] Removed ingress: $fqdn"
 
+    # 3. DNS: cloudflared has no "route dns delete" — inform user
+    echo "[DNS] Remove the CNAME for $fqdn manually in the Cloudflare dashboard."
+
+    # 4. Reload/restart running services
     if is_caddy_running; then
         reload_caddy
-    else
-        echo "Caddy is not running. Changes will apply on next start."
     fi
+
+    if is_tunnel_running; then
+        restart_tunnel
+    fi
+
+    echo ""
+    echo "Done. $fqdn removed."
 }
 
 cmd_list() {
     load_env
     echo "Configured services:"
     echo ""
+
+    local found=false
     grep -oP '^[a-z0-9-]+(?=\.\{\$DOMAIN\})' "$CADDYFILE" | while read -r sub; do
-        # Extract the upstream from the reverse_proxy line
+        found=true
         upstream=$(awk "/^${sub}\.\{\\\$DOMAIN\}/,/^}/" "$CADDYFILE" | grep -oP 'reverse_proxy \K.+' || echo "???")
-        printf "  %-20s → %s\n" "${sub}.${DOMAIN}" "$upstream"
+        printf "  https://%-30s → %s\n" "${sub}.${DOMAIN}" "$upstream"
     done
+
+    if [ "$found" = false ]; then
+        echo "  (none)"
+    fi
 }
 
 # --- Main ---
@@ -169,12 +297,12 @@ usage() {
 Usage: $0 <command> [args]
 
 Commands:
-  setup              Initial setup (create network, check env)
+  setup              Authenticate, create tunnel, configure credentials
   start              Start Caddy + Cloudflare tunnel
   stop               Stop all ingress services
-  reload             Reload Caddy after Caddyfile changes
-  add <subdomain>    Add a service subdomain and reload
-  delete <subdomain> Remove a service subdomain and reload
+  reload             Reload Caddy after manual Caddyfile edits
+  add <subdomain>    Add service to Caddy + tunnel + DNS, reload
+  delete <subdomain> Remove service from Caddy + tunnel, reload
   list               List configured subdomains
 EOF
 }
