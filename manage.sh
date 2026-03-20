@@ -189,7 +189,7 @@ cmd_add() {
     local fqdn="${subdomain}.${DOMAIN}"
 
     # Check if already exists in Caddyfile
-    if grep -qF "${subdomain}.\{\$DOMAIN}" "$CADDYFILE"; then
+    if grep -qF "${fqdn}" "$CADDYFILE"; then
         echo "Error: $fqdn already exists."
         exit 1
     fi
@@ -204,7 +204,7 @@ cmd_add() {
     # 1. Add to Caddyfile
     cat >> "$CADDYFILE" <<EOF
 
-${subdomain}.{\$DOMAIN} {
+${fqdn} {
     reverse_proxy ${upstream}
 }
 EOF
@@ -244,13 +244,13 @@ cmd_delete() {
 
     local fqdn="${subdomain}.${DOMAIN}"
 
-    if ! grep -qF "${subdomain}.\{\$DOMAIN}" "$CADDYFILE"; then
+    if ! grep -qF "${fqdn}" "$CADDYFILE"; then
         echo "Error: $fqdn not found in Caddyfile."
         exit 1
     fi
 
-    # 1. Remove from Caddyfile (the block: subdomain line through closing brace)
-    sed -i "/^${subdomain}\.{\\\$DOMAIN}/,/^}/d" "$CADDYFILE"
+    # 1. Remove from Caddyfile (the block: fqdn line through closing brace)
+    sed -i "/^${fqdn//./\\.} {/,/^}/d" "$CADDYFILE"
     echo "[Caddy] Removed: $fqdn"
 
     # 2. Remove from cloudflared config (hostname line + service line below it)
@@ -279,10 +279,10 @@ cmd_list() {
     echo ""
 
     local found=false
-    grep -oP '^[a-z0-9-]+(?=\.\{)' "$CADDYFILE" | while read -r sub; do
+    grep -oP '^[a-z0-9.-]+(?= \{)' "$CADDYFILE" | grep -v "^:" | while read -r host; do
         found=true
-        upstream=$(awk "/^${sub}\./,/^}/" "$CADDYFILE" | grep -oP 'reverse_proxy \K.+' || echo "???")
-        printf "  https://%-30s → %s\n" "${sub}.${DOMAIN}" "$upstream"
+        upstream=$(awk "/^${host//./\\.} \\{/,/^}/" "$CADDYFILE" | grep -oP 'reverse_proxy \K.+' || echo "???")
+        printf "  https://%-30s → %s\n" "$host" "$upstream"
     done
 
     if [ "$found" = false ]; then

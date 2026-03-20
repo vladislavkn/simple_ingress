@@ -1,0 +1,3 @@
+:80 {
+  respond "Not Found" 404
+}
