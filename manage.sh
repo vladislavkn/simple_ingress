@@ -41,6 +41,10 @@ reload_caddy() {
     fi
 }
 
+is_caddy_running() {
+    docker inspect -f '{{.State.Running}}' caddy 2>/dev/null | grep -q true
+}
+
 # --- Commands ---
 
 cmd_setup() {
@@ -119,7 +123,7 @@ EOF
     echo "Added: ${subdomain}.${DOMAIN} → ${upstream}"
 
     # Reload if Caddy is running
-    if $COMPOSE ps --status running 2>/dev/null | grep -q caddy; then
+    if is_caddy_running; then
         reload_caddy
     else
         echo "Caddy is not running. Start with '$0 start', then reload."
@@ -140,7 +144,7 @@ cmd_delete() {
 
     echo "Deleted: ${subdomain}.${DOMAIN}"
 
-    if $COMPOSE ps --status running 2>/dev/null | grep -q caddy; then
+    if is_caddy_running; then
         reload_caddy
     else
         echo "Caddy is not running. Changes will apply on next start."
