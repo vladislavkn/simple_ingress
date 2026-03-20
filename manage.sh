@@ -6,7 +6,7 @@ COMPOSE="docker compose -f $SCRIPT_DIR/docker-compose.yaml"
 CADDYFILE="$SCRIPT_DIR/Caddyfile"
 ENV_FILE="$SCRIPT_DIR/.env"
 CF_DIR="$SCRIPT_DIR/cloudflared"
-CF_CONFIG="$CF_DIR/config.yml"
+CF_CONFIG="$CF_DIR/config.yaml"
 
 # --- Helpers ---
 
