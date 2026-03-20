@@ -55,13 +55,13 @@ When you run `./manage.sh add nextcloud`:
 
 1. Prompts for the upstream (e.g. `nextcloud-app:80`)
 2. Adds a block to `Caddyfile`
-3. Adds an ingress rule to `cloudflared/config.yml`
+3. Adds an ingress rule to `cloudflared/config.yaml`
 4. Creates a DNS CNAME record via `cloudflared tunnel route dns`
 5. Reloads Caddy and restarts the tunnel
 
 ## Adding a New Service
 
-1. In the service's `docker-compose.yml`, give the public-facing container a
+1. In the service's `docker-compose.yaml`, give the public-facing container a
    `container_name` and attach it to `caddy-net`:
 
    ```yaml
@@ -99,7 +99,7 @@ Done. `https://myapp.yourdomain.com` is live.
    - Open a Cloudflare auth URL (first time only)
    - Create the tunnel (or reuse existing)
    - Copy credentials into `cloudflared/`
-   - Write `cloudflared/config.yml`
+   - Write `cloudflared/config.yaml`
 4. Run `./manage.sh start`.
 
 ## Files
@@ -107,8 +107,8 @@ Done. `https://myapp.yourdomain.com` is live.
 | File                      | Purpose                                           |
 | ------------------------- | ------------------------------------------------- |
 | `manage.sh`               | Single entry point for all operations             |
-| `docker-compose.yml`      | Caddy + cloudflared containers                    |
+| `docker-compose.yaml`     | Caddy + cloudflared containers                    |
 | `Caddyfile`               | Caddy routing rules per subdomain                 |
 | `.env`                    | Domain and tunnel name                            |
-| `cloudflared/config.yml`  | Tunnel ingress rules (managed by `manage.sh`)     |
+| `cloudflared/config.yaml` | Tunnel ingress rules (managed by `manage.sh`)     |
 | `cloudflared/<uuid>.json` | Tunnel credentials (created by `manage.sh setup`) |

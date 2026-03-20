@@ -31,7 +31,7 @@ check_env() {
 }
 
 check_tunnel_configured() {
-    if ! grep -q "^tunnel:" "$CF_CONFIG" || grep -q "^# tunnel" "$CF_CONFIG"; then
+    if ! grep -q "^tunnel:" "$CF_CONFIG" 2>/dev/null; then
         echo "Error: Tunnel not configured. Run '$0 setup' first."
         exit 1
     fi
@@ -136,14 +136,14 @@ cmd_setup() {
         sed -i "s|^tunnel:.*|tunnel: ${TUNNEL_UUID}|" "$CF_CONFIG"
         sed -i "s|^credentials-file:.*|credentials-file: /etc/cloudflared/${TUNNEL_UUID}.json|" "$CF_CONFIG"
     else
-        # Fresh config — prepend tunnel info before ingress
+        # Fresh config — prepend tunnel info, strip template comments
         local tmp
         tmp=$(mktemp)
         cat > "$tmp" <<EOF
 tunnel: ${TUNNEL_UUID}
 credentials-file: /etc/cloudflared/${TUNNEL_UUID}.json
 
-$(cat "$CF_CONFIG")
+$(grep -v "^#" "$CF_CONFIG")
 EOF
         mv "$tmp" "$CF_CONFIG"
     fi
