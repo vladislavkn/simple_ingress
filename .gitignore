@@ -1,0 +1,4 @@
+.env
+cloudflared/*.json
+cloudflared/uuid
+cloudflared/config.yaml

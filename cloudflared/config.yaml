@@ -1,5 +1,0 @@
-# tunnel and credentials-file are set by manage.sh setup
-# ingress rules are managed by manage.sh add/delete
-
-ingress:
-  - service: http_status:404
